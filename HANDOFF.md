@@ -8,7 +8,7 @@
 
 ## 1. 一句话现状
 
-`@local/quick-reply`：DSH Web 界面的「引用回复」插件，两个入口（选中助手正文 / 侧栏会话行的引号按钮），都只填草稿、不发送。
+`@local/quick-reply`：DSH Web 界面的「引用回复」插件，两个入口（选中任意区域文字 / 侧栏会话行的引号按钮），都只填草稿、不发送。
 
 **能跑，测试全绿**：
 
@@ -37,7 +37,7 @@ C:\Users\tupi\.dsh\profiles\desktop\package.json
 
 | 文件 | 作用 | 改它的风险 |
 |---|---|---|
-| `client.js`（763 行） | **全部逻辑**：选区缓存、浮条、桥、侧栏按钮、样式 | 主战场 |
+| `client.js`（785 行） | **全部逻辑**：选区缓存、浮条、桥、侧栏按钮、样式 | 主战场 |
 | `index.js` | 宿主半边，空实现（`export function apply(ctx){ void ctx }`） | 低。`exports` 指向它，别删 |
 | `cordis.patch.yml` | 向 Cordis 注入 `id: quick-reply` 的插件条目 | 低，改 id 会变成另一个插件 |
 | `package.json` | 包元数据 + `dsh.bundle` / `dsh.client` 声明 | 中。`dsh.client.inject` 决定能 require 到哪些宿主包 |
@@ -79,7 +79,8 @@ sidebar.workspaces.session.row.action ← 侧栏引号按钮（root 作用域）
 | `[data-chat-flow-kind="assistant-step"]` | 判定选区是不是助手正文 | `readSelection()` |
 | `[data-chat-turn]` | 取轮次号（出处标注） | `readSelection()` |
 | `[data-chat-node-key]` | 缓存的选区键 | `readSelection()` |
-| `[data-composer-card] [contenteditable="true"]` | 填完草稿后把焦点送回去 | `focusComposer()` |
+| `[class*="_sessionRow"]` / `[class*="_projectRow"]` | 侧栏行被宿主 `user-select:none`，要放开成 `text` 才能拖选 | `STYLE_TEXT` |
+| `[data-composer-card]` / `[contenteditable="true"]` | ①选区落在这里不算引用（排除自己打的草稿）②填完草稿后把焦点送回去 | `readSelection()` / `focusComposer()` |
 | dock props：`input` / `inputActions` / `sessionId` / `session` / `useChat` | 桥的全部输入 | `ComposerBridge(props)` |
 | 侧栏行 props：`sessionId` / `displayTitle` / `t` | 侧栏按钮 | `SidebarQuoteButton(props)` |
 
@@ -91,6 +92,7 @@ sidebar.workspaces.session.row.action ← 侧栏引号按钮（root 作用域）
 - **样式表常量不能叫 `CSS`**：会遮蔽浏览器全局 `CSS`，`CSS.highlights` 变 `undefined`，高亮静默失效。现在叫 `STYLE_TEXT`。
 - **浮层拿不到 `t`**：`shell.overlay` 的注册契约没有 `locale` 字段，所以浮条文案靠 `document.documentElement.lang` 猜中/英；侧栏按钮能拿到宿主 `t`。这是取舍，不是遗漏。
 - **卡片位置必须在 `useLayoutEffect` 里算**：要先量出卡片宽度才能决定右缘对齐、是否翻到上方。位置没好之前放 `left:-9999px`，避免在左上角闪一下。
+- **侧栏会话行是 `user-select:none`**：宿主（`ui-workspace` 的 `.hIlkoa_sessionRow`）禁掉了选择，不覆盖 CSS 就永远选不中侧栏文字。选择器别写死 `.hIlkoa_` 前缀（打包 hash，升级就变），用 `[class*="_sessionRow"]`。
 - **点按钮的 `mousedown` 必须 `preventDefault()`**，否则选区在按下瞬间消失、卡片自己关掉。
 - **`highlightPinned`**：填完草稿后选区被输入框抢走，但高亮要留着给用户回看；下一次真的选中新文字才换掉。
 - **纯函数区**（`// >>>PURE-HELPERS` 到 `// <<<PURE-HELPERS<<<`）里不许出现 DOM / React，否则 `test/helpers.test.mjs` 抠出来会跑不起来。

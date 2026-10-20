@@ -53,6 +53,12 @@ window.__ModuleLoader__.load({
       `[data-slot="conversation.input.dock"]:empty{display:none!important}`,
       // 引用原文高亮：用 CSS Custom Highlight API，不改宿主 DOM，所以不会打乱 React 的渲染。
       `::highlight(${HL_NAME}){background-color:var(--dsw-alias-state-business-primary-a20,rgba(77,107,254,.28));color:inherit}`,
+      // 侧栏的会话行/项目行被宿主设了 user-select:none，文字根本选不中，「选中侧栏文字再引用」
+      // 就无从谈起。这里只把可选中性放开：单击仍然是单击（浏览器只有拖过一段距离才算选中），
+      // 悬停按钮、置顶、归档这些行为都不受影响。
+      // 选择器用「类名里含 _sessionRow / _projectRow」而不是写死 .hIlkoa_xxx：
+      // 那个 hash 前缀是打包工具生成的，宿主一升级就会变，而 _sessionRow 这段是源码里的名字。
+      `[class*="_sessionRow"], [class*="_projectRow"]{user-select:text;-webkit-user-select:text}`,
     ].join('\n')
 
 
@@ -217,8 +223,14 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 读当前页面选区。只接受「起点和终点在同一个 assistant-step 节点里」的选区：
+     * 读当前页面选区。
+     *
+     * 聊天区里只接受「起点和终点在同一个 assistant-step 节点里」的选区：
      * 这样用户自己的提问、工具卡片、思考过程都不会被带进来。
+     *
+     * 聊天区**以外**（左侧会话列表、右侧资源面板这些地方）选中的文字也允许引用，
+     * 那里没有「第几轮」的概念，出处就只写文字本身。唯一的例外是输入框：
+     * 选中自己正在打的草稿不算引用，得排除掉，否则打字时随手选中一段也会弹浮条。
      */
     function readSelection() {
       const empty = { text: '', key: '', turn: 0, range: null, anchor: null }
@@ -228,17 +240,27 @@ window.__ModuleLoader__.load({
       const startEl = elementOf(range.startContainer)
       const endEl = elementOf(range.endContainer)
       if (!startEl || !endEl) return empty
+      if (startEl.closest('[data-composer-card]') !== null) return empty
+      if (endEl.closest('[data-composer-card]') !== null) return empty
+      if (startEl.closest('[contenteditable="true"]') !== null) return empty
+      if (endEl.closest('[contenteditable="true"]') !== null) return empty
       const startNode = startEl.closest('[data-chat-flow-kind]')
       const endNode = endEl.closest('[data-chat-flow-kind]')
-      if (!startNode || startNode !== endNode) return empty
-      if (startNode.getAttribute('data-chat-flow-kind') !== 'assistant-step') return empty
+      // 一头在聊天流里、一头在外面：跨区选择，不认
+      if ((startNode === null) !== (endNode === null)) return empty
+      if (startNode !== null) {
+        // 聊天区：必须整段落在同一个助手步骤里
+        if (startNode !== endNode) return empty
+        if (startNode.getAttribute('data-chat-flow-kind') !== 'assistant-step') return empty
+      }
       const text = String(selection.toString() || '').trim()
       if (!text) return empty
-      // 轮次号由宿主写在同一个 div 上（data-chat-turn），用来给模型一个「这段话在哪」的坐标
-      const turn = Number(startNode.getAttribute('data-chat-turn'))
+      // 轮次号由宿主写在同一个 div 上（data-chat-turn），用来给模型一个「这段话在哪」的坐标。
+      // 聊天区外的选区没有这个坐标，给 0，出处那行就不写了。
+      const turn = startNode === null ? 0 : Number(startNode.getAttribute('data-chat-turn'))
       return {
         text,
-        key: startNode.getAttribute('data-chat-node-key') || '',
+        key: startNode === null ? '' : startNode.getAttribute('data-chat-node-key') || '',
         turn: Number.isSafeInteger(turn) && turn > 0 ? turn : 0,
         range,
         anchor: anchorOf(selection, range),
