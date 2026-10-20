@@ -15,7 +15,7 @@ assert.ok(start !== -1 && end !== -1, 'client.js 里找不到 PURE-HELPERS 标�
 
 const body = source.slice(source.indexOf('\n', start) + 1, source.lastIndexOf('\n', end))
 const helpers = new Function(
-  `${body}\nreturn { quoteText, quoteExcerpt, mergeDraft, turnRefLine, lineRefLine, quoteInsert, assistantText, lastAssistantAnswer, lastAssistantText, lastAssistantTurn }`,
+  `${body}\nreturn { quoteText, quoteExcerpt, mergeDraft, turnRefLine, lineRefLine, quoteInsert, quoteBody, matchKey, quoteStillInDraft, prunePinned, assistantText, lastAssistantAnswer, lastAssistantText, lastAssistantTurn }`,
 )()
 const {
   quoteText,
@@ -24,6 +24,10 @@ const {
   turnRefLine,
   lineRefLine,
   quoteInsert,
+  quoteBody,
+  matchKey,
+  quoteStillInDraft,
+  prunePinned,
   assistantText,
   lastAssistantAnswer,
   lastAssistantText,
@@ -132,6 +136,51 @@ test('quoteInsert 走行号出处（聊天区外选中的文字）', () => {
   assert.equal(quoteInsert('某段话', 3, 79), '> 某段话 （引用自第3轮回答）\n')
   // 都没有就不写半截标注
   assert.equal(quoteInsert('某段话', 0, 0), '> 某段话\n')
+})
+
+// ---- 高亮跟着草稿走：引用被删掉，原文就不该继续亮 ----
+
+test('quoteBody 就是 quoteInsert 里那段原文（两边必须是同一个文本）', () => {
+  assert.equal(quoteBody('一段话'), '> 一段话')
+  const insert = quoteInsert('一段话', 5)
+  assert.ok(insert.startsWith(quoteBody('一段话')), 'quoteInsert 开头应该正好是 quoteBody')
+})
+
+test('quoteBody 跟着截断走，长文本不会被误判成「草稿里没有」', () => {
+  const long = '第一行\n第二行\n第三行很长很长很长'
+  assert.ok(quoteBody(long).includes('…（略）'), '超过 2 行要截断')
+  assert.ok(quoteInsert(long, 2).includes(quoteBody(long)))
+})
+
+test('matchKey 只留字，标点空白都不算', () => {
+  assert.equal(matchKey('比原版多了第 2、3 条和'), '比原版多了第23条和')
+  assert.equal(matchKey('> a-b_c!'), 'abc')
+  assert.equal(matchKey(undefined), '')
+})
+
+test('quoteStillInDraft：草稿里还有这段字就算在', () => {
+  const text = '比原版多了第 2、3 条和'
+  assert.equal(quoteStillInDraft(text, '> 比原版多了第 2、3 条和 （引用自第25轮回答）\n'), true)
+  // 用户改了标点、加了空格，仍然算在（只比字）
+  assert.equal(quoteStillInDraft(text, '> 比原版多了第2.3条和，然后呢'), true)
+  // 删掉引用就没了
+  assert.equal(quoteStillInDraft(text, ''), false)
+  assert.equal(quoteStillInDraft(text, '别的问题'), false)
+  // 空引用永远不算在（否则空文本会匹配一切）
+  assert.equal(quoteStillInDraft('', '任意草稿'), false)
+})
+
+test('prunePinned 只留下草稿里还在的引用', () => {
+  const kept = { text: '还在的引用', range: {} }
+  const gone = { text: '删掉的引用', range: {} }
+  const out = prunePinned([kept, gone], '> 还在的引用 （引用自第3轮回答）')
+  assert.equal(out.length, 1)
+  assert.equal(out[0], kept)
+  // 草稿被清空（发送后）→ 一条都不留
+  assert.equal(prunePinned([kept, gone], '').length, 0)
+  // 脏输入不该炸
+  assert.deepEqual(prunePinned(null, 'x'), [])
+  assert.deepEqual(prunePinned([null, undefined], 'x'), [])
 })
 
 // ---- 侧栏引用：从聊天快照里挑「最后一条说完了的助手回答」 ----

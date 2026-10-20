@@ -136,9 +136,49 @@ window.__ModuleLoader__.load({
      * 不会把字接在「）」后面。拿不到轮次号时只给引用，不留半截标注。
      */
     function quoteInsert(text, turn, line) {
-      const quoted = quoteText(quoteExcerpt(text))
+      const quoted = quoteBody(text)
       const ref = turnRefLine(turn) || lineRefLine(line)
       return (ref ? quoted + ' ' + ref : quoted) + '\n'
+    }
+
+    /**
+     * 引用块里真正是「原文」的那部分（不含 `> ` 前缀和出处标注）。
+     *
+     * 单独抽出来是因为它有两个用处：拼草稿（quoteInsert），以及之后判断
+     * 「这段引用还在草稿里吗」——两处必须用同一个文本，否则对不上。
+     */
+    function quoteBody(text) {
+      return quoteText(quoteExcerpt(text))
+    }
+
+    /**
+     * 比较用的指纹：只留字母、数字、汉字，标点空白全扔掉。
+     *
+     * 草稿里存的是富文本，用户可能顺手改了标点、多了个空格，或者宿主把
+     * 引用渲染成带 `>` 小块——按原文逐字比较会误判成「删掉了」，
+     * 高亮就会莫名其妙灭掉。只比「字」最稳。
+     */
+    function matchKey(text) {
+      return String(text === undefined || text === null ? '' : text).replace(/[^\p{L}\p{N}]/gu, '')
+    }
+
+    /** 这段引用还在草稿里吗？用户把引用删掉，对应的高亮就该跟着灭。 */
+    function quoteStillInDraft(pinnedText, draft) {
+      const key = matchKey(pinnedText)
+      if (!key) return false
+      return matchKey(draft).includes(key)
+    }
+
+    /**
+     * 从「钉住的高亮」里剔掉草稿中已经不存在的引用，返回剩下的。
+     *
+     * 为什么按草稿判断而不是按「有没有点删除」：用户删引用可能是整段删、
+     * 可能是撤销、可能是发送后被清空，也可能是把引用改得面目全非。
+     * 所有情况归结成一句——草稿里找不到这段字了，就不该再亮着。
+     */
+    function prunePinned(list, draft) {
+      if (!Array.isArray(list)) return []
+      return list.filter((item) => item && quoteStillInDraft(item.text, draft))
     }
 
     /** 新草稿 = 原草稿（保留用户已经写的内容）+ 空一行 + 本次要插入的文字。 */
@@ -375,15 +415,16 @@ window.__ModuleLoader__.load({
      * 不用二选一。这也正是「引用之后高亮要一直留着」的实现方式：把引用过的 Range
      * 攒进 pinnedRanges，每次重画时一起塞进去。
      */
-    const pinnedRanges = []
+    const pinnedQuotes = []
 
     /** 丢掉已经失效的 Range（宿主重渲染会把文本节点换掉，旧的 Range 就断开了）。 */
     function livePinnedRanges() {
-      for (let i = pinnedRanges.length - 1; i >= 0; i -= 1) {
-        const node = pinnedRanges[i] && pinnedRanges[i].startContainer
-        if (!node || node.isConnected === false) pinnedRanges.splice(i, 1)
+      for (let i = pinnedQuotes.length - 1; i >= 0; i -= 1) {
+        const range = pinnedQuotes[i] && pinnedQuotes[i].range
+        const node = range && range.startContainer
+        if (!node || node.isConnected === false) pinnedQuotes.splice(i, 1)
       }
-      return pinnedRanges
+      return pinnedQuotes.map((item) => item.range)
     }
 
     /** 重画高亮：常驻的引用高亮 + 当前正在选的那一段（可为空）。 */
@@ -400,13 +441,57 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 把刚引用过的这一段钉住：此后它一直亮着，直到页面刷新。 */
-    function pinHighlight(range) {
+    /** 读输入框里当前的草稿文本（读不到就当空——空草稿意味着没有引用，高亮全灭）。 */
+    function composerText() {
+      try {
+        const node = document.querySelector('[data-composer-card] [contenteditable="true"]')
+        return node && typeof node.textContent === 'string' ? node.textContent : ''
+      } catch {
+        return ''
+      }
+    }
+
+    /**
+     * 按草稿现状清一遍：草稿里已经被删掉的引用，不再钉着。
+     *
+     * 为什么每次都要扫一遍而不是「记住点了删除」：删除的方式太多了——整段删、
+     * 撤销、发送后宿主播空输入框、把它改成别的话。没必要逐个识别，
+     * 统一问一句「这段字还在草稿里吗」就够了。
+     */
+    function pruneByDraft() {
+      const kept = prunePinned(pinnedQuotes, composerText())
+      if (kept.length === pinnedQuotes.length) return false
+      pinnedQuotes.length = 0
+      for (const item of kept) pinnedQuotes.push(item)
+      return true
+    }
+
+    /** 把刚引用过的这一段钉住：只要它还留在草稿里，就一直亮着。 */
+    function pinHighlight(range, text) {
       if (!range) return
-      livePinnedRanges().push(range)
+      pinnedQuotes.push({ text: typeof text === 'string' ? text : '', range })
       // 引用太多次时丢掉最早的，别让高亮列表无限长
-      if (pinnedRanges.length > 50) pinnedRanges.shift()
+      if (pinnedQuotes.length > 50) pinnedQuotes.shift()
+      // 草稿填失败（比如 inputActions 还没就绪）时，这条引用其实没进去，别让它亮着。
+      // 必须等一帧再看：setDraft 之后 React 要重渲染，DOM 里的文本在下一帧才更新，
+      // 立刻核对会把刚钉住的这条误判成「草稿里没有」。
+      window.requestAnimationFrame(() => {
+        if (pruneByDraft()) renderHighlight(null)
+      })
       renderHighlight(null)
+    }
+
+    /**
+     * 草稿一改就核对一遍：引用被删掉，原文的高亮立刻消失。
+     *
+     * 挂在 document 上用捕获阶段：输入框是宿主自己造的 contenteditable，
+     * 我们拿不到它的 React 实例，只能从外面听事件。用捕获是为了在宿主的
+     * 受控组件处理之前就拿到最新文本（冒泡阶段可能已经被重渲染覆盖）。
+     */
+    function onComposerInput(event) {
+      const target = event && event.target
+      if (!target || target.isContentEditable !== true) return
+      if (pruneByDraft()) renderHighlight(null)
     }
 
     /** 选区变化后合并成一帧再更新，避免拖选过程中疯狂重渲染。 */
@@ -718,7 +803,8 @@ window.__ModuleLoader__.load({
       const apply = () => {
         fillDraft(composerBridge.inputActions, composerBridge.draft, quoteInsert(selection.text, selection.turn, selection.line))
         // 填完就把缓存清掉，避免卡片继续挂着；刚引用的这一段落钉住，之后一直亮着
-        pinHighlight(selection.range)
+        // （草稿里把这段引用删掉，它会自己灭——见 onComposerInput）
+        pinHighlight(selection.range, quoteBody(selection.text))
         selectionStore.set({ text: '', key: '', turn: 0, line: 0, anchor: null })
         // 兜底：万一焦点没进输入框，页面选区还在，selectionchange 会把卡片又拉回来。
         // 这时候主动清掉选区；高亮是独立的 Range，不受影响。
@@ -794,6 +880,14 @@ window.__ModuleLoader__.load({
             window.removeEventListener('resize', scheduleSync)
           }
         }, 'quick-reply: selection listener')
+
+        // 草稿被改动（删引用、撤销、发送后清空）→ 核对钉住的高亮，删掉的就不亮了
+        ctx.effect(() => {
+          document.addEventListener('input', onComposerInput, true)
+          return () => {
+            document.removeEventListener('input', onComposerInput, true)
+          }
+        }, 'quick-reply: composer input listener')
 
         // 桥：只取 inputActions / 草稿，不渲染（见 ComposerBridge 注释）
         ctx.slots.inject('conversation.input.dock', () =>

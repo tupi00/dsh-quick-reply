@@ -2,7 +2,7 @@
 
 给「接下这个仓库的人」看。使用者看 [README.md](./README.md)，这里记的是：现在什么状态、为什么这么写、宿主改版时先查哪里、下一步该干什么。
 
-最后更新：2026-10-20 · 版本 **1.3.0** · HEAD `4441f5c`
+最后更新：2026-10-21 · 版本 **1.3.1** · HEAD 见 `git log -1`
 
 ---
 
@@ -37,7 +37,7 @@ C:\Users\tupi\.dsh\profiles\desktop\package.json
 
 | 文件 | 作用 | 改它的风险 |
 |---|---|---|
-| `client.js`（785 行） | **全部逻辑**：选区缓存、浮条、桥、侧栏按钮、样式 | 主战场 |
+| `client.js`（946 行） | **全部逻辑**：选区缓存、浮条、桥、侧栏按钮、高亮、样式 | 主战场 |
 | `index.js` | 宿主半边，空实现（`export function apply(ctx){ void ctx }`） | 低。`exports` 指向它，别删 |
 | `cordis.patch.yml` | 向 Cordis 注入 `id: quick-reply` 的插件条目 | 低，改 id 会变成另一个插件 |
 | `package.json` | 包元数据 + `dsh.bundle` / `dsh.client` 声明 | 中。`dsh.client.inject` 决定能 require 到哪些宿主包 |
@@ -65,7 +65,7 @@ sidebar.workspaces.session.row.action ← 侧栏引号按钮（root 作用域）
 1. **必须缓存选区**：点按钮的 `mousedown` 会清掉页面选区，所以在 `selectionchange` 里先把「文本 / 轮次 / 屏幕坐标 / Range」记进 `selectionStore`（`requestAnimationFrame` 合帧，拖选不重渲染），点按钮时用缓存。
 2. **锚点取 `selection.focusNode` 而不是 `range` 末尾**：选区分方向，从下往上拖时 `range` 终点在文本上面，会把卡片甩到选区开头。`focusPointOf()` 在焦点处收一个零宽 `Range` 取坐标，才是鼠标松开那一点。
 3. **侧栏按钮不跨会话读历史**：它只 `pendingQuoteStore.set(sessionId)` + `ctx.uiWorkspace.openSession()`，桥跟着会话重挂，等新会话历史加载完再填。代价是用户会看到一次会话切换——这是刻意的，换掉它等于让插件去 retain 别人的会话历史（出错面大得多）。
-4. **高亮是「多个 Range 装进一个 Highlight」**：`pinnedRanges` 数组存引用过的 Range，`renderHighlight(current)` 每次把「常驻的 + 当前选中的」一起 `registry.set(HL_NAME, new Highlight(...all))`。宿主重渲染会换掉文本节点导致旧 Range 断开，`livePinnedRanges()` 每轮剔除 `startContainer.isConnected === false` 的；超过 50 段丢最早的。
+4. **高亮是「多个 Range 装进一个 Highlight」，且跟着草稿走**：`pinnedQuotes` 数组存 `{ text, range }`，`renderHighlight(current)` 每次把「常驻的 + 当前选中的」一起 `registry.set(HL_NAME, new Highlight(...all))`。宿主重渲染会换掉文本节点导致旧 Range 断开，`livePinnedRanges()` 每轮剔除 `startContainer.isConnected === false` 的；超过 50 段丢最早的。**草稿一改就 `pruneByDraft()`**：`quoteStillInDraft(text, draft)` 用 `matchKey()`（只留汉字/字母/数字）比较，草稿里找不到这段字就撤掉高亮。为什么不逐字比：用户改标点、宿主把引用渲染成带 `>` 的块，逐字比会误判成删除。`pinHighlight` 里那次核对要放到 `requestAnimationFrame` 之后——`setDraft` 后 React 下一帧才更新 DOM，立刻核对会把刚钉住的误判成没填进去。
 5. **行号靠坐标猜，不认类名**：`lineRefOf(range)` 取选区第一个字盒，往左试 6/14/24/36/50 像素，在那些点上 `document.elementsFromPoint` 找纯数字元素——代码/diff 面板的行号列就在正文左外侧。读不到返回 0，出处那一行就不写。绝不写死宿主类名，宿主换皮不影响。
 
 ## 5. 宿主契约清单（升级 DSH 后先查这几处）
