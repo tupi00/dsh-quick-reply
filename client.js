@@ -202,7 +202,7 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     const selectionStore = {
       // anchor = 选区末尾在屏幕上的坐标，浮条据此贴着鼠标/文字出现。
-      snapshot: { text: '', key: '', turn: 0, line: 0, anchor: null },
+      snapshot: { text: '', key: '', turn: 0, line: 0, range: null, anchor: null },
       listeners: new Set(),
       subscribe(fn) {
         selectionStore.listeners.add(fn)
@@ -221,7 +221,12 @@ window.__ModuleLoader__.load({
             next.anchor !== null &&
             prev.anchor.x === next.anchor.x &&
             prev.anchor.y === next.anchor.y)
-        if (prev.text === next.text && prev.key === next.key && prev.turn === next.turn && sameAnchor) return
+        if (prev.text === next.text && prev.key === next.key && prev.turn === next.turn && sameAnchor) {
+          // 选区没变（拖选过程中会反复触发），但 Range 可能是刚新造的那个。
+          // 悄悄换掉：不触发重渲染，只是别让引用时钉住一个已经断开的旧 Range。
+          if (next.range && prev.range !== next.range) prev.range = next.range
+          return
+        }
         selectionStore.snapshot = next
         for (const fn of selectionStore.listeners) fn()
       },
@@ -412,7 +417,7 @@ window.__ModuleLoader__.load({
         rafId = 0
         const next = readSelection()
         renderHighlight(next.text ? next.range : null)
-        selectionStore.set({ text: next.text, key: next.key, turn: next.turn, line: next.line, anchor: next.anchor })
+        selectionStore.set({ text: next.text, key: next.key, turn: next.turn, line: next.line, range: next.range, anchor: next.anchor })
       })
     }
 
