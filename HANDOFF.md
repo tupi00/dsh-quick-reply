@@ -2,7 +2,7 @@
 
 给「接下这个仓库的人」看。使用者看 [README.md](./README.md)，这里记的是：现在什么状态、为什么这么写、宿主改版时先查哪里、下一步该干什么。
 
-最后更新：2026-10-20 · 版本 **1.2.0** · HEAD `e818c98`
+最后更新：2026-10-20 · 版本 **1.3.0** · HEAD `4441f5c`
 
 ---
 
@@ -111,13 +111,14 @@ sidebar.workspaces.session.row.action ← 侧栏引号按钮（root 作用域）
 
 **P0 · 对外发布前要有**
 - [ ] README 和本文件补「**适配的 DSH 版本**」。现在只写了「平台 web」，装到老版本上失效没有任何提示，公开项目这是第一个 issue。建议在 `package.json` 加一个 `dsh.client.minHostVersion`（若宿主支持）或在 README 顶部写死实测版本号。
-- [ ] 补 `CHANGELOG.md`（历史已在 git log：v1.1.0 `a6e2a77`、v1.2.0 `e818c98`，倒着补三条即可）。
-- [ ] 加一条 GitHub Actions：`node test/helpers.test.mjs` + `node --check`。零依赖、不联网，30 秒跑完。
+- [x] 补 `CHANGELOG.md`（1.3.0 起有，历史倒补到 v1.0.0）。
+- [x] `package.json` 加 `scripts.test`（`node test/helpers.test.mjs && node --check client.js`）。
+- [ ] 加一条 GitHub Actions：`npm test`。零依赖、不联网，30 秒跑完。
 
 **P1 · 真实存在的小问题**
 - [ ] `quoteExcerpt()` 用 `slice(0, maxChars)` 截断，可能切断代理对（emoji / 生僻字）变乱码字符。改成按码点截。
 - [ ] 卸载时没有清 `CSS.highlights` 里的 `dshQR-quote` 条目（`apply()` 里缺一个 cleanup effect）。无害，但卸载后 registry 里留个悬空条目。
-- [ ] `package.json` 缺 `scripts.test`（StepFold 有），开发者得记命令。
+- [ ] 高亮和卡片都靠「选区缓存的 Range」活着；宿主若哪天把聊天区的文本节点整棵换掉（比如切成虚拟滚动），`livePinnedRanges()` 会把它们全剔掉——那时需要换成「按文本内容重新定位」的做法。
 
 **P2 · 功能候选（先问需求再动）**
 - [ ] `QUOTE_MAX_LINES` / `QUOTE_MAX_CHARS` 写死（2 行 / 120 字），没有设置项。
@@ -126,7 +127,7 @@ sidebar.workspaces.session.row.action ← 侧栏引号按钮（root 作用域）
 
 ## 9. 发布流程
 
-1. 改 `package.json` 的 `version`（当前 1.2.0）。
+1. 改 `package.json` 的 `version`（当前 1.3.0）和 `CHANGELOG.md` 加一节。
 2. README 里对应描述同步（行为细节、已知限制两节最常改）。
 3. 跑第 1 节那三条命令，全绿。
 4. `git commit` → `git tag vX.Y.Z` → 推到 `origin`（`git@github.com:tupi00/dsh-quick-reply.git`），GitHub 上发 Release。
