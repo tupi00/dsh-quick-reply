@@ -1,6 +1,6 @@
 # dsh-quick-reply · 引用回复
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai) （下称 DSH）Web 界面用的一个小插件：**在助手的回答里选中一段文字，输入框上方会出现一个「引用回复」按钮。点一下，就把这段文字变成 Markdown 引用块填进草稿，不自动发送。**
+给 DeepSeek Harness（下称 DSH）Web 界面用的一个小插件：**在助手的回答里选中一段文字，输入框上方会出现一个「引用回复」按钮。点一下，就把这段文字变成 Markdown 引用块填进草稿，不自动发送。**
 
 只做这一件事。没有悬浮球、没有侧栏、没有快捷键冲突。
 
