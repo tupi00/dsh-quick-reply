@@ -15,13 +15,14 @@ assert.ok(start !== -1 && end !== -1, 'client.js 里找不到 PURE-HELPERS 标�
 
 const body = source.slice(source.indexOf('\n', start) + 1, source.lastIndexOf('\n', end))
 const helpers = new Function(
-  `${body}\nreturn { quoteText, quoteExcerpt, mergeDraft, turnRefLine, quoteInsert, assistantText, lastAssistantAnswer, lastAssistantText, lastAssistantTurn }`,
+  `${body}\nreturn { quoteText, quoteExcerpt, mergeDraft, turnRefLine, lineRefLine, quoteInsert, assistantText, lastAssistantAnswer, lastAssistantText, lastAssistantTurn }`,
 )()
 const {
   quoteText,
   quoteExcerpt,
   mergeDraft,
   turnRefLine,
+  lineRefLine,
   quoteInsert,
   assistantText,
   lastAssistantAnswer,
@@ -114,6 +115,23 @@ test('quoteInsert 没有轮次号时只给引用（也要留末尾换行）', ()
 
 test('quoteInsert 的空内容仍保留出处标注（不该整块消失）', () => {
   assert.equal(quoteInsert('', 5), '>  （引用自第5轮回答）\n')
+})
+
+test('lineRefLine 只在拿到合法行号时给标注', () => {
+  assert.equal(lineRefLine(79), '（引用自第79行）')
+  assert.equal(lineRefLine('79'), '（引用自第79行）')
+  assert.equal(lineRefLine(0), '')
+  assert.equal(lineRefLine(undefined), '')
+  assert.equal(lineRefLine(-3), '')
+  assert.equal(lineRefLine(1.5), '')
+})
+
+test('quoteInsert 走行号出处（聊天区外选中的文字）', () => {
+  assert.equal(quoteInsert('data-chat-turn', 0, 79), '> data-chat-turn （引用自第79行）\n')
+  // 两者都给时轮次优先：轮次是更强的坐标
+  assert.equal(quoteInsert('某段话', 3, 79), '> 某段话 （引用自第3轮回答）\n')
+  // 都没有就不写半截标注
+  assert.equal(quoteInsert('某段话', 0, 0), '> 某段话\n')
 })
 
 // ---- 侧栏引用：从聊天快照里挑「最后一条说完了的助手回答」 ----

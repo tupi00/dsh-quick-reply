@@ -65,6 +65,8 @@ sidebar.workspaces.session.row.action ← 侧栏引号按钮（root 作用域）
 1. **必须缓存选区**：点按钮的 `mousedown` 会清掉页面选区，所以在 `selectionchange` 里先把「文本 / 轮次 / 屏幕坐标 / Range」记进 `selectionStore`（`requestAnimationFrame` 合帧，拖选不重渲染），点按钮时用缓存。
 2. **锚点取 `selection.focusNode` 而不是 `range` 末尾**：选区分方向，从下往上拖时 `range` 终点在文本上面，会把卡片甩到选区开头。`focusPointOf()` 在焦点处收一个零宽 `Range` 取坐标，才是鼠标松开那一点。
 3. **侧栏按钮不跨会话读历史**：它只 `pendingQuoteStore.set(sessionId)` + `ctx.uiWorkspace.openSession()`，桥跟着会话重挂，等新会话历史加载完再填。代价是用户会看到一次会话切换——这是刻意的，换掉它等于让插件去 retain 别人的会话历史（出错面大得多）。
+4. **高亮是「多个 Range 装进一个 Highlight」**：`pinnedRanges` 数组存引用过的 Range，`renderHighlight(current)` 每次把「常驻的 + 当前选中的」一起 `registry.set(HL_NAME, new Highlight(...all))`。宿主重渲染会换掉文本节点导致旧 Range 断开，`livePinnedRanges()` 每轮剔除 `startContainer.isConnected === false` 的；超过 50 段丢最早的。
+5. **行号靠坐标猜，不认类名**：`lineRefOf(range)` 取选区第一个字盒，往左试 6/14/24/36/50 像素，在那些点上 `document.elementsFromPoint` 找纯数字元素——代码/diff 面板的行号列就在正文左外侧。读不到返回 0，出处那一行就不写。绝不写死宿主类名，宿主换皮不影响。
 
 ## 5. 宿主契约清单（升级 DSH 后先查这几处）
 

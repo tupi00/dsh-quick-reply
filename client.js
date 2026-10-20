@@ -114,6 +114,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 聊天区以外（侧栏、右侧的代码 / diff 面板）没有「第几轮」，但代码面板每行左边
+     * 有行号。能读到行号就写行号，读不到就什么都不写——宁可只有一句光秃秃的引用，
+     * 也不编一个假的出处。
+     */
+    function lineRefLine(line) {
+      const value = Number(line)
+      if (!Number.isSafeInteger(value) || value <= 0) return ''
+      return '（引用自第' + value + '行）'
+    }
+
+    /**
      * 拼出最终要塞进草稿的整块内容：引用原文，出处标注紧跟在最后一行引用后面。
      *
      * 为什么出处不单独占一行：单独一行会把引用块撑成两段，视觉上像两件事；
@@ -124,9 +135,9 @@ window.__ModuleLoader__.load({
      * 让光标落在引用块下面那行，用户直接打字就是自己的问题，
      * 不会把字接在「）」后面。拿不到轮次号时只给引用，不留半截标注。
      */
-    function quoteInsert(text, turn) {
+    function quoteInsert(text, turn, line) {
       const quoted = quoteText(quoteExcerpt(text))
-      const ref = turnRefLine(turn)
+      const ref = turnRefLine(turn) || lineRefLine(line)
       return (ref ? quoted + ' ' + ref : quoted) + '\n'
     }
 
@@ -191,7 +202,7 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     const selectionStore = {
       // anchor = 选区末尾在屏幕上的坐标，浮条据此贴着鼠标/文字出现。
-      snapshot: { text: '', key: '', turn: 0, anchor: null },
+      snapshot: { text: '', key: '', turn: 0, line: 0, anchor: null },
       listeners: new Set(),
       subscribe(fn) {
         selectionStore.listeners.add(fn)
@@ -233,7 +244,7 @@ window.__ModuleLoader__.load({
      * 选中自己正在打的草稿不算引用，得排除掉，否则打字时随手选中一段也会弹浮条。
      */
     function readSelection() {
-      const empty = { text: '', key: '', turn: 0, range: null, anchor: null }
+      const empty = { text: '', key: '', turn: 0, line: 0, range: null, anchor: null }
       const selection = typeof window !== 'undefined' ? window.getSelection() : null
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) return empty
       const range = selection.getRangeAt(0)
@@ -262,6 +273,8 @@ window.__ModuleLoader__.load({
         text,
         key: startNode === null ? '' : startNode.getAttribute('data-chat-node-key') || '',
         turn: Number.isSafeInteger(turn) && turn > 0 ? turn : 0,
+        // 只有聊天区外才去猜行号：聊天区里没有行号列，白白算一遍还要碰 DOM 坐标
+        line: startNode === null ? lineRefOf(range) : 0,
         range,
         anchor: anchorOf(selection, range),
       }
@@ -291,6 +304,44 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 猜「这段文字在第几行」。
+     *
+     * 代码 / diff 面板的每行左边有一列行号，它和正文同一水平线、紧贴在正文左外侧。
+     * 所以这里不去认宿主的类名（一升级就变），而是从「选区第一个字往左挪几像素」
+     * 的那个点，看那儿叠着哪些元素——最上层的纯数字就是行号。
+     * 读不到就返回 0，调用方据此干脆不写出来处，不自造一个假坐标。
+     */
+    function lineRefOf(range) {
+      if (!range) return 0
+      let rect = null
+      try {
+        const rects = range.getClientRects()
+        rect = rects.length > 0 ? rects[0] : range.getBoundingClientRect()
+      } catch {
+        return 0
+      }
+      if (!rect || rect.height <= 0) return 0
+      if (typeof document.elementsFromPoint !== 'function') return 0
+      const y = rect.top + Math.min(rect.height, 14) / 2
+      // 从贴近正文的位置往外一点点试：先试 6px，再试更远的，行号列一般就在这段范围里
+      for (const offset of [6, 14, 24, 36, 50]) {
+        const x = rect.left - offset
+        if (x <= 0) continue
+        let stack = []
+        try {
+          stack = document.elementsFromPoint(x, y)
+        } catch {
+          return 0
+        }
+        for (const el of stack) {
+          const text = String(el.textContent || '').trim()
+          if (/^\d{1,6}$/.test(text)) return Number(text)
+        }
+      }
+      return 0
+    }
+
     /** 把选区焦点收成一个零宽 Range，取它在屏幕上的坐标（就是光标/鼠标所在的那点）。 */
     function focusPointOf(selection) {
       if (!selection || !selection.focusNode) return null
@@ -314,34 +365,44 @@ window.__ModuleLoader__.load({
      * 为什么用这套 API 而不是包一层 <mark>：宿主是 React 渲染的，我们改它的 DOM
      * 会在下一次重渲染时被抹掉，还可能打乱 diff。Highlight 只登记范围，不碰 DOM。
      * 不支持这套 API 的浏览器上静默跳过——功能不受影响，只是少了视觉提示。
+     *
+     * 一个 Highlight 可以装好几个 Range，所以「引用过的」和「正在选的」可以同时亮着，
+     * 不用二选一。这也正是「引用之后高亮要一直留着」的实现方式：把引用过的 Range
+     * 攒进 pinnedRanges，每次重画时一起塞进去。
      */
-    function applyHighlight(range) {
+    const pinnedRanges = []
+
+    /** 丢掉已经失效的 Range（宿主重渲染会把文本节点换掉，旧的 Range 就断开了）。 */
+    function livePinnedRanges() {
+      for (let i = pinnedRanges.length - 1; i >= 0; i -= 1) {
+        const node = pinnedRanges[i] && pinnedRanges[i].startContainer
+        if (!node || node.isConnected === false) pinnedRanges.splice(i, 1)
+      }
+      return pinnedRanges
+    }
+
+    /** 重画高亮：常驻的引用高亮 + 当前正在选的那一段（可为空）。 */
+    function renderHighlight(current) {
       const registry = typeof CSS !== 'undefined' && CSS !== null ? CSS.highlights : null
-      if (!registry || typeof Highlight !== 'function' || !range) return
+      if (!registry || typeof Highlight !== 'function') return
+      const all = livePinnedRanges().slice()
+      if (current) all.push(current)
       try {
-        registry.set(HL_NAME, new Highlight(range))
+        if (all.length === 0) registry.delete(HL_NAME)
+        else registry.set(HL_NAME, new Highlight(...all))
       } catch {
-        /* 范围已经被重渲染换掉时 set 可能抛错，忽略即可 */
+        /* 范围被重渲染换掉时 set 可能抛错，忽略即可 */
       }
     }
 
-    /** 撤掉高亮（选区消失、且不是刚填完草稿留下的钉子时调用）。 */
-    function clearHighlight() {
-      const registry = typeof CSS !== 'undefined' && CSS !== null ? CSS.highlights : null
-      if (!registry || typeof registry.delete !== 'function') return
-      try {
-        registry.delete(HL_NAME)
-      } catch {
-        /* 没有就算了 */
-      }
+    /** 把刚引用过的这一段钉住：此后它一直亮着，直到页面刷新。 */
+    function pinHighlight(range) {
+      if (!range) return
+      livePinnedRanges().push(range)
+      // 引用太多次时丢掉最早的，别让高亮列表无限长
+      if (pinnedRanges.length > 50) pinnedRanges.shift()
+      renderHighlight(null)
     }
-
-    /**
-     * 填完草稿后页面选区会被输入框抢走焦点，高亮却应该留着——
-     * 让用户还能看见「我刚才引用的是哪一段」。所以这里打个钉子，
-     * 等下一次真的选中新文字时再换掉。
-     */
-    let highlightPinned = false
 
     /** 选区变化后合并成一帧再更新，避免拖选过程中疯狂重渲染。 */
     let rafId = 0
@@ -350,13 +411,8 @@ window.__ModuleLoader__.load({
       rafId = window.requestAnimationFrame(() => {
         rafId = 0
         const next = readSelection()
-        if (next.text) {
-          highlightPinned = false
-          applyHighlight(next.range)
-        } else if (!highlightPinned) {
-          clearHighlight()
-        }
-        selectionStore.set({ text: next.text, key: next.key, turn: next.turn, anchor: next.anchor })
+        renderHighlight(next.text ? next.range : null)
+        selectionStore.set({ text: next.text, key: next.key, turn: next.turn, line: next.line, anchor: next.anchor })
       })
     }
 
@@ -655,10 +711,10 @@ window.__ModuleLoader__.load({
 
       /** 引用：拼成 Markdown 引用块 + 出处标注，填进草稿，收工。 */
       const apply = () => {
-        fillDraft(composerBridge.inputActions, composerBridge.draft, quoteInsert(selection.text, selection.turn))
-        // 填完就把缓存清掉，避免卡片继续挂着；高亮留着给用户回看
-        highlightPinned = true
-        selectionStore.set({ text: '', key: '', turn: 0, anchor: null })
+        fillDraft(composerBridge.inputActions, composerBridge.draft, quoteInsert(selection.text, selection.turn, selection.line))
+        // 填完就把缓存清掉，避免卡片继续挂着；刚引用的这一段落钉住，之后一直亮着
+        pinHighlight(selection.range)
+        selectionStore.set({ text: '', key: '', turn: 0, line: 0, anchor: null })
         // 兜底：万一焦点没进输入框，页面选区还在，selectionchange 会把卡片又拉回来。
         // 这时候主动清掉选区；高亮是独立的 Range，不受影响。
         try {
@@ -683,7 +739,11 @@ window.__ModuleLoader__.load({
         h(
           'span',
           { className: `${CLS}_hint` },
-          selection.turn > 0 ? tr(props.t, 'selectedTurn', { turn: selection.turn }) : tr(props.t, 'selected'),
+          selection.turn > 0
+            ? tr(props.t, 'selectedTurn', { turn: selection.turn })
+            : selection.line > 0
+              ? tr(props.t, 'selectedLine', { line: selection.line })
+              : tr(props.t, 'selected'),
         ),
         h(
           'button',
@@ -699,6 +759,7 @@ window.__ModuleLoader__.load({
     const zh = {
       selected: '已选中文字',
       selectedTurn: '已选中第 {turn} 轮的文字',
+      selectedLine: '已选中第 {line} 行',
       quote: '引用回复',
       quoteLast: '引用最后一条回答',
     }
@@ -706,6 +767,7 @@ window.__ModuleLoader__.load({
     const en = {
       selected: 'Text selected',
       selectedTurn: 'Text selected in turn {turn}',
+      selectedLine: 'Text selected on line {line}',
       quote: 'Quote',
       quoteLast: 'Quote the last answer',
     }
