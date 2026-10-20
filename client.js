@@ -1,15 +1,15 @@
 /**
- * 浏览器端插件：选中助手正文后，一键「引用回复」。
+ * 浏览器端插件：选中助手正文后，鼠标旁边冒出一张「引用回复」小卡片。
  *
- * 只有一个功能，挂在宿主已经分配好空间的槽位上：
- *   conversation.input.dock —— 输入框卡片上方的那一排。
- *   选中助手正文后，这里出现一行：一句提示 + 一个「引用回复」按钮。
+ * 宿主给了两个位置：
+ *   shell.overlay           —— 整个窗口最上层、不随聊天滚动的一块浮层（本插件用它）。
+ *   conversation.input.dock —— 输入框卡片上方那一排（本插件只用它来拿 inputActions，不渲染东西）。
+ *
+ * 为什么浮层要分两处：shell.overlay 是 root 作用域，拿不到输入框的 inputActions；
+ * 而 dock 能拿到。所以 dock 里挂一个「只存 props 不渲染」的桥，浮条点按钮时从桥里取。
  *
  * 行为：把选中的文字变成 Markdown 引用块，填进输入框草稿，不自动发送。
  * 发不发、发什么，用户自己按回车。原文会用高亮标出来，方便对照。
- *
- * 为什么不自己往页面中间塞浮条：宿主规范要求插件只用官方槽位，
- * 不要读别人的 DOM 去算位置。输入框上方是官方给的常驻空间，稳。
  */
 window.__ModuleLoader__.load({
   id: '@local/quick-reply',
@@ -33,17 +33,22 @@ window.__ModuleLoader__.load({
      * 遮蔽之后 CSS.highlights 永远是 undefined，引用高亮会静默失效。
      */
     const STYLE_TEXT = [
-      // 输入框上方：一行提示 + 一个按钮
-      `.${CLS}_bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 0}`,
+      // 选区旁的浮层卡片：位置由组件按鼠标坐标算好，这里只管长相。
+      `.${CLS}_float{position:fixed;z-index:40;display:flex;align-items:center;gap:6px;padding:5px 6px 5px 10px;border-radius:10px;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2));box-shadow:0 6px 24px rgba(0,0,0,.18);white-space:nowrap;pointer-events:auto}`,
       `.${CLS}_hint{font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary,#8a8f98);white-space:nowrap;padding-right:2px}`,
       `.${CLS}_btn{height:26px;padding:0 10px;font-size:12px;line-height:1;font-family:inherit;border-radius:var(--dsw-radius-sm,6px);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.28));background:transparent;color:var(--dsw-alias-label-primary,inherit);cursor:pointer;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}`,
       `.${CLS}_btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}`,
       `.${CLS}_btn:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#4183c4);outline-offset:1px}`,
       `.${CLS}_primary{background:var(--dsw-alias-button-info-fill,#4183c4);border-color:transparent;color:var(--dsw-alias-bg-base,#fff)}`,
       `.${CLS}_primary:hover{background:var(--dsw-alias-button-info-hover,#3b76b0)}`,
+      // 输入框上方那个「只传数据、不画东西」的桥，渲染出来是个空壳。宿主给 dock 的每项
+      // 都套了一层带 data-slot 的容器，而 composerStack 有 6px 的 gap —— 空壳会白白撑出
+      // 一条缝，把输入框整体往上推。这里把空的项藏掉，长什么样都不影响布局。
+      `[data-slot="conversation.input.dock"]:empty{display:none!important}`,
       // 引用原文高亮：用 CSS Custom Highlight API，不改宿主 DOM，所以不会打乱 React 的渲染。
       `::highlight(${HL_NAME}){background-color:var(--dsw-alias-state-business-primary-a20,rgba(77,107,254,.28));color:inherit}`,
     ].join('\n')
+
 
     // 以下纯函数会被 test/helpers.test.mjs 抠出来单测，别在这里用 DOM/React。
     // >>>PURE-HELPERS
@@ -126,7 +131,8 @@ window.__ModuleLoader__.load({
     // 为什么必须缓存：点按钮时 mousedown 会把页面选区清掉，所以要在那之前记住文本。
     // ------------------------------------------------------------------
     const selectionStore = {
-      snapshot: { text: '', key: '', turn: 0 },
+      // anchor = 选区末尾在屏幕上的坐标，浮条据此贴着鼠标/文字出现。
+      snapshot: { text: '', key: '', turn: 0, anchor: null },
       listeners: new Set(),
       subscribe(fn) {
         selectionStore.listeners.add(fn)
@@ -139,7 +145,13 @@ window.__ModuleLoader__.load({
       },
       set(next) {
         const prev = selectionStore.snapshot
-        if (prev.text === next.text && prev.key === next.key && prev.turn === next.turn) return
+        const sameAnchor =
+          (prev.anchor === null && next.anchor === null) ||
+          (prev.anchor !== null &&
+            next.anchor !== null &&
+            prev.anchor.x === next.anchor.x &&
+            prev.anchor.y === next.anchor.y)
+        if (prev.text === next.text && prev.key === next.key && prev.turn === next.turn && sameAnchor) return
         selectionStore.snapshot = next
         for (const fn of selectionStore.listeners) fn()
       },
@@ -156,7 +168,7 @@ window.__ModuleLoader__.load({
      * 这样用户自己的提问、工具卡片、思考过程都不会被带进来。
      */
     function readSelection() {
-      const empty = { text: '', key: '', turn: 0, range: null }
+      const empty = { text: '', key: '', turn: 0, range: null, anchor: null }
       const selection = typeof window !== 'undefined' ? window.getSelection() : null
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) return empty
       const range = selection.getRangeAt(0)
@@ -176,6 +188,48 @@ window.__ModuleLoader__.load({
         key: startNode.getAttribute('data-chat-node-key') || '',
         turn: Number.isSafeInteger(turn) && turn > 0 ? turn : 0,
         range,
+        anchor: anchorOf(selection, range),
+      }
+    }
+
+    /**
+     * 取「鼠标松开那一点」的屏幕坐标，用来决定浮条放哪。
+     *
+     * 为什么看 focus 而不是 range 的最后一截：
+     *   选区分方向。从下往上拖选时，range 的终点在文档里是上面那行，
+     *   取它就会把卡片放到选区开头，离鼠标很远（用户实测反馈「有点太远」）。
+     *   而 selection.focusNode/focusOffset 永远停在鼠标松开的那一端——
+     *   不管是正拖还是反拖，往那里收一个零宽 Range 就能拿到精确坐标。
+     * 拿不到 focus 坐标时（比如键盘选择、节点已不在渲染树）再退回 range 末尾。
+     */
+    function anchorOf(selection, range) {
+      const focus = focusPointOf(selection)
+      if (focus) return focus
+      if (!range) return null
+      try {
+        const rects = range.getClientRects()
+        const last = rects.length > 0 ? rects[rects.length - 1] : range.getBoundingClientRect()
+        if (!last) return null
+        return { x: last.right, y: last.bottom }
+      } catch {
+        return null
+      }
+    }
+
+    /** 把选区焦点收成一个零宽 Range，取它在屏幕上的坐标（就是光标/鼠标所在的那点）。 */
+    function focusPointOf(selection) {
+      if (!selection || !selection.focusNode) return null
+      try {
+        const caret = document.createRange()
+        caret.setStart(selection.focusNode, selection.focusOffset)
+        caret.collapse(true)
+        const rect = caret.getBoundingClientRect()
+        if (!rect) return null
+        // 节点不在渲染树里时 rect 全是 0，这种坐标用了反而把卡片扔到左上角
+        if (rect.width === 0 && rect.height === 0 && rect.left === 0 && rect.top === 0) return null
+        return { x: rect.right || rect.left, y: rect.bottom || rect.top }
+      } catch {
+        return null
       }
     }
 
@@ -227,7 +281,7 @@ window.__ModuleLoader__.load({
         } else if (!highlightPinned) {
           clearHighlight()
         }
-        selectionStore.set({ text: next.text, key: next.key, turn: next.turn })
+        selectionStore.set({ text: next.text, key: next.key, turn: next.turn, anchor: next.anchor })
       })
     }
 
@@ -316,8 +370,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 取文案：正常由宿主注入的 t(key, params)，极端情况下回落到内置中文，
+     * 取文案：正常由宿主注入的 t(key, params)，极端情况下回落到内置字典，
      * 避免正文直接炸出英文 key。params 用来填「第 {turn} 轮」这类占位符。
+     *
+     * 为什么还要看 document.lang：浮条挂在 shell.overlay（root 作用域），
+     * 那里宿主的注册契约里没有 locale 字段，拿不到 t。这时按页面语言挑中/英，
+     * 总比英文用户看到中文强。
      */
     function tr(t, key, params) {
       if (typeof t === 'function') {
@@ -328,44 +386,116 @@ window.__ModuleLoader__.load({
           /* 落到下面 */
         }
       }
-      const fallback = zh[key] || key
+      const lang = typeof document !== 'undefined' ? String(document.documentElement.lang || '') : ''
+      const fallback = (lang.toLowerCase().startsWith('en') ? en[key] : zh[key]) || zh[key] || key
       if (params === undefined) return fallback
       return fallback.replace(/\{(\w+)\}/g, (whole, name) =>
         params[name] === undefined ? whole : String(params[name]),
       )
     }
 
-    /** 输入框上方那条：选中助手正文后出现。 */
-    function SelectionBar(props) {
-      const { input, inputActions, t } = props
+    /**
+     * 只存 props、不渲染任何东西的「桥」。
+     *
+     * 为什么需要它：浮条挂在 shell.overlay（窗口最上层、root 作用域），那里拿不到
+     * 输入框的 inputActions 和当前草稿；而 conversation.input.dock 拿得到。
+     * 所以在 dock 里挂一个空组件，把这两样东西存到模块变量里，浮条点按钮时来取。
+     */
+    const composerBridge = { inputActions: null, draft: '' }
+
+    function ComposerBridge(props) {
+      const { input, inputActions } = props
+      // 每次渲染都刷新一次，保证点按钮时拿到的是最新草稿
+      React.useEffect(() => {
+        composerBridge.inputActions = inputActions || null
+        composerBridge.draft = input && typeof input.draft === 'string' ? input.draft : ''
+      })
+      // 桥被卸载（切会话、输入框重挂）时清空，避免浮条拿到过期引用
+      React.useEffect(
+        () => () => {
+          composerBridge.inputActions = null
+          composerBridge.draft = ''
+        },
+        [],
+      )
+      return null
+    }
+
+    /** 鼠标旁边那张小卡片：选中助手正文后出现。 */
+    function SelectionFloat(props) {
       const selection = useSelection()
-      const draft = input && typeof input.draft === 'string' ? input.draft : ''
-      if (!selection.text || !inputActions) return null
+      const hostRef = React.useRef(null)
+      const [pos, setPos] = React.useState(null)
+
+      /**
+       * 位置在「渲染后」算：卡片宽度要先量出来，才能判断贴到窗口右边时该不该往回缩。
+       * 用 layoutEffect 在浏览器绘制前算完，用户看不到跳一下。
+       */
+      React.useLayoutEffect(() => {
+        if (!selection.text) {
+          setPos(null)
+          return
+        }
+        const el = hostRef.current
+        if (!el) return
+        const rect = el.getBoundingClientRect()
+        const gap = 8
+        const anchor = selection.anchor
+        const x = anchor ? anchor.x : 16
+        const y = anchor ? anchor.y : 16
+        // 卡片「尾」（右缘）对齐字尾：左缘 = 字尾坐标 - 卡片宽。
+        // 头对齐会把整张卡片甩到选区右边，离用户正在看的字隔开一段；尾对齐则卡片
+        // 缩在文字下方、右缘与字尾齐平，视线不用跳。
+        let left = x - rect.width
+        let top = y + gap
+        // 左边放不下（字尾已经贴着窗口左缘）才翻成头对齐
+        if (left < gap) left = x + gap
+        // 下边放不下就翻到字的上面
+        if (top + rect.height > window.innerHeight - gap) top = y - rect.height - gap
+        // 最后再夹进窗口，别因为窗口太窄/太矮溢出
+        left = Math.max(gap, Math.min(left, window.innerWidth - rect.width - gap))
+        top = Math.max(gap, Math.min(top, window.innerHeight - rect.height - gap))
+        setPos({ left, top })
+      }, [selection.text, selection.anchor && selection.anchor.x, selection.anchor && selection.anchor.y])
+
+      if (!selection.text) return null
 
       /** 引用：拼成 Markdown 引用块 + 出处标注，填进草稿，收工。 */
       const apply = () => {
-        fillDraft(inputActions, draft, quoteInsert(selection.text, selection.turn))
-        // 填完就把缓存清掉，避免按钮条继续挂着；高亮留着给用户回看
+        fillDraft(composerBridge.inputActions, composerBridge.draft, quoteInsert(selection.text, selection.turn))
+        // 填完就把缓存清掉，避免卡片继续挂着；高亮留着给用户回看
         highlightPinned = true
-        selectionStore.set({ text: '', key: '', turn: 0 })
+        selectionStore.set({ text: '', key: '', turn: 0, anchor: null })
+        // 兜底：万一焦点没进输入框，页面选区还在，selectionchange 会把卡片又拉回来。
+        // 这时候主动清掉选区；高亮是独立的 Range，不受影响。
+        try {
+          const active = document.activeElement
+          const sel = window.getSelection()
+          if (sel && !sel.isCollapsed && !(active && active.isContentEditable)) sel.removeAllRanges()
+        } catch {
+          /* 清不掉就算了，下次点别处也会消失 */
+        }
       }
 
       return h(
         'div',
         {
-          className: `${CLS}_bar`,
-          // 保住页面选区：否则按下按钮的瞬间选区被清空，这条 bar 会自己消失
+          ref: hostRef,
+          className: `${CLS}_float`,
+          // 位置算好之前先放到屏幕外，避免在左上角闪一下
+          style: pos ? { left: pos.left + 'px', top: pos.top + 'px' } : { left: '-9999px', top: '0px' },
+          // 保住页面选区：否则按下按钮的瞬间选区被清空，卡片会自己消失
           onMouseDown: (event) => event.preventDefault(),
         },
         h(
           'span',
           { className: `${CLS}_hint` },
-          selection.turn > 0 ? tr(t, 'selectedTurn', { turn: selection.turn }) : tr(t, 'selected'),
+          selection.turn > 0 ? tr(props.t, 'selectedTurn', { turn: selection.turn }) : tr(props.t, 'selected'),
         ),
         h(
           'button',
           { type: 'button', className: `${CLS}_btn ${CLS}_primary`, onClick: apply },
-          tr(t, 'quote'),
+          tr(props.t, 'quote'),
         ),
       )
     }
@@ -392,19 +522,37 @@ window.__ModuleLoader__.load({
         ctx.effect(() => insertStyles(), 'quick-reply: styles')
         ctx.effect(() => {
           document.addEventListener('selectionchange', scheduleSync)
-          return () => document.removeEventListener('selectionchange', scheduleSync)
+          // 聊天滚动 / 窗口缩放时选区矩形会变，重算一次位置，让卡片跟着文字走
+          window.addEventListener('scroll', scheduleSync, true)
+          window.addEventListener('resize', scheduleSync)
+          return () => {
+            document.removeEventListener('selectionchange', scheduleSync)
+            window.removeEventListener('scroll', scheduleSync, true)
+            window.removeEventListener('resize', scheduleSync)
+          }
         }, 'quick-reply: selection listener')
 
-        // 输入框上方那一条（唯一的挂载点）
+        // 桥：只取 inputActions / 草稿，不渲染（见 ComposerBridge 注释）
         ctx.slots.inject('conversation.input.dock', () =>
           ctx.slots.register(
             {
               name: 'conversation.input.dock',
-              id: 'quick-reply-bar',
+              id: 'quick-reply-bridge',
               order: 60,
-              locale: NS,
             },
-            SelectionBar,
+            ComposerBridge,
+          ),
+        )
+
+        // 浮条：挂在窗口最上层，位置由选区坐标决定
+        ctx.slots.inject('shell.overlay', () =>
+          ctx.slots.register(
+            {
+              name: 'shell.overlay',
+              id: 'quick-reply-float',
+              order: 0,
+            },
+            SelectionFloat,
           ),
         )
       },
