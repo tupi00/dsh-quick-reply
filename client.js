@@ -41,6 +41,12 @@ window.__ModuleLoader__.load({
       `.${CLS}_btn:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#4183c4);outline-offset:1px}`,
       `.${CLS}_primary{background:var(--dsw-alias-button-info-fill,#4183c4);border-color:transparent;color:var(--dsw-alias-bg-base,#fff)}`,
       `.${CLS}_primary:hover{background:var(--dsw-alias-button-info-hover,#3b76b0)}`,
+      // 侧栏会话行末尾的悬停按钮：和宿主自带的「归档 / 置顶」并排。尺寸、颜色、
+      // 悬停行为都照抄宿主（16x16、三级文字色、悬停变主文字色、不铺底色），
+      // 否则一眼就能看出是外挂的。宿主那条规则在 ui-workspace 的 .iconButton 里。
+      `.${CLS}_rowBtn{border-radius:var(--dsw-radius-xs,4px);cursor:pointer;width:16px;height:16px;color:var(--dsw-alias-label-tertiary,#8a8f98);background:0 0;border:none;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex}`,
+      `.${CLS}_rowBtn:hover{color:var(--dsw-alias-label-primary,inherit)}`,
+      `.${CLS}_rowBtn:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4183c4));outline-offset:-2px}`,
       // 输入框上方那个「只传数据、不画东西」的桥，渲染出来是个空壳。宿主给 dock 的每项
       // 都套了一层带 data-slot 的容器，而 composerStack 有 6px 的 gap —— 空壳会白白撑出
       // 一条缝，把输入框整体往上推。这里把空的项藏掉，长什么样都不影响布局。
@@ -123,6 +129,53 @@ window.__ModuleLoader__.load({
       const base = typeof draft === 'string' ? draft.replace(/\s+$/, '') : ''
       if (!base) return insert
       return base + '\n\n' + insert
+    }
+
+    /** 把一个助手步骤里的文字块拼成纯文本（思考、工具调用、图片都不算正文）。 */
+    function assistantText(blocks) {
+      if (!Array.isArray(blocks)) return ''
+      return blocks
+        .filter((block) => block && block.kind === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('\n')
+        .trim()
+    }
+
+    /**
+     * 从聊天快照里找「最后一条已经说完的助手回答」，连它属于第几轮一起返回。
+     *
+     * 为什么跳过 status === 'running'：那一步还在往外吐字，引一半会被截断，
+     * 用户拿去追问时模型看到的是半句话。宁可等它说完。
+     * 为什么要轮次号：侧栏引用的是「整个会话的最后一条回答」，用户没法像选区那样
+     * 一眼看到它来自第几轮，补上轮次号模型才有坐标。
+     * 返回 {text, turn}，找不到就是 {'', 0}——调用方据此决定要不要填草稿。
+     */
+    function lastAssistantAnswer(snapshot) {
+      const empty = { text: '', turn: 0 }
+      if (!snapshot || !Array.isArray(snapshot.order)) return empty
+      const nodes = snapshot.nodes
+      if (!nodes || typeof nodes.get !== 'function') return empty
+      for (let i = snapshot.order.length - 1; i >= 0; i -= 1) {
+        const node = nodes.get(snapshot.order[i])
+        if (!node || node.kind !== 'assistant-step') continue
+        const data = node.data || {}
+        if (data.status === 'running') continue
+        const text = assistantText(data.blocks)
+        if (!text) continue
+        const turn = Number(data.turn)
+        return { text, turn: Number.isSafeInteger(turn) && turn > 0 ? turn : 0 }
+      }
+      return empty
+    }
+
+    /** 只取文字（给 React selector 用：基本类型才不会因为对象换新引用而反复重渲染）。 */
+    function lastAssistantText(snapshot) {
+      return lastAssistantAnswer(snapshot).text
+    }
+
+    /** 只取轮次号（同上）。 */
+    function lastAssistantTurn(snapshot) {
+      return lastAssistantAnswer(snapshot).turn
     }
     // <<<PURE-HELPERS<<<
 
@@ -400,16 +453,92 @@ window.__ModuleLoader__.load({
      * 为什么需要它：浮条挂在 shell.overlay（窗口最上层、root 作用域），那里拿不到
      * 输入框的 inputActions 和当前草稿；而 conversation.input.dock 拿得到。
      * 所以在 dock 里挂一个空组件，把这两样东西存到模块变量里，浮条点按钮时来取。
+     *
+     * 侧栏那个按钮也靠这座桥：它挂在 root 作用域，既没有 inputActions 也读不到
+     * 聊天记录。它只负责把「要引用哪个会话」写进 pendingQuoteStore，
+     * 真正的取文字 + 填草稿在这里做——因为这里能同时拿到两样东西。
      */
     const composerBridge = { inputActions: null, draft: '' }
 
+    /**
+     * 侧栏点了引用、等着填草稿的会话 id；null 表示没有待办。
+     *
+     * 为什么做成一个小 store 而不是普通变量：侧栏按钮和输入框不在同一棵 React 树里，
+     * 按钮把会话 id 写进来时，桥那边必须被通知到才会重新渲染、才会去填草稿。
+     * 用普通变量的话，桥的依赖项（sessionId / 最后一条回答）都没变，
+     * effect 根本不会重跑，点了就像没反应。
+     */
+    const pendingQuoteStore = {
+      value: null,
+      listeners: new Set(),
+      subscribe(fn) {
+        pendingQuoteStore.listeners.add(fn)
+        return () => {
+          pendingQuoteStore.listeners.delete(fn)
+        }
+      },
+      getSnapshot() {
+        return pendingQuoteStore.value
+      },
+      set(next) {
+        if (pendingQuoteStore.value === next) return
+        pendingQuoteStore.value = next
+        for (const fn of pendingQuoteStore.listeners) fn()
+      },
+    }
+
+    /** 订阅「有没有待引用的会话」。 */
+    function usePendingQuote() {
+      if (typeof React.useSyncExternalStore === 'function') {
+        return React.useSyncExternalStore(pendingQuoteStore.subscribe, pendingQuoteStore.getSnapshot)
+      }
+      const [value, setValue] = React.useState(pendingQuoteStore.getSnapshot())
+      React.useEffect(() => pendingQuoteStore.subscribe(() => setValue(pendingQuoteStore.getSnapshot())), [])
+      return value
+    }
+
+    // 给「拿不到 useChat」的情况准备一个空壳 hook。
+    // 为什么也要占一个 hook：React 要求每次渲染的 hook 数量和顺序一致，
+    // 直接 `props.useChat ? props.useChat(x) : null` 会让两边的 hook 数不同，
+    // 一旦宿主某次没传 useChat，组件就整棵炸掉。空壳同样只调一次 useSyncExternalStore。
+    const noopSubscribe = () => () => {}
+    const noopSnapshot = () => undefined
+    function useNoChat() {
+      if (typeof React.useSyncExternalStore === 'function') {
+        return React.useSyncExternalStore(noopSubscribe, noopSnapshot)
+      }
+      return undefined
+    }
+
     function ComposerBridge(props) {
-      const { input, inputActions } = props
+      const { input, inputActions, sessionId, session } = props
+      const useChatHook = typeof props.useChat === 'function' ? props.useChat : useNoChat
+      // 取「最后一条说完了的助手回答」：侧栏引用要引的就是它
+      const lastText = useChatHook(lastAssistantText) || ''
+      const lastTurn = useChatHook(lastAssistantTurn) || 0
+      // 侧栏刚点了哪个会话（null = 没待办）。订阅它，按钮一写进来这里就会重渲染。
+      const pending = usePendingQuote()
+
       // 每次渲染都刷新一次，保证点按钮时拿到的是最新草稿
       React.useEffect(() => {
         composerBridge.inputActions = inputActions || null
         composerBridge.draft = input && typeof input.draft === 'string' ? input.draft : ''
       })
+
+      // 侧栏点了引用 → 已经切到那个会话 → 等它最后一条回答出现，填进草稿
+      React.useEffect(() => {
+        if (pending === null) return
+        if (sessionId !== pending) return
+        if (!lastText) {
+          // 历史还在加载（openState 还不是 open）就先等着；
+          // 但如果这个会话已经打开完了却一条回答都没有，就别把待办永远挂着
+          if (session && session.openState === 'open') pendingQuoteStore.set(null)
+          return
+        }
+        pendingQuoteStore.set(null)
+        fillDraft(inputActions, input && input.draft, quoteInsert(lastText, lastTurn))
+      }, [pending, sessionId, session, lastText, lastTurn, inputActions, input])
+
       // 桥被卸载（切会话、输入框重挂）时清空，避免浮条拿到过期引用
       React.useEffect(
         () => () => {
@@ -419,6 +548,48 @@ window.__ModuleLoader__.load({
         [],
       )
       return null
+    }
+
+    /**
+     * 侧栏会话行末尾的「引用最后一条回答」按钮。
+     *
+     * 为什么只写一个标记就返回：这个槽位是 root 作用域，拿不到输入框也读不到聊天，
+     * 唯一能做的是「切换会话 + 留个待办」。真正的填草稿由 ComposerBridge 完成
+     * （它跟着会话一起重挂，正好能等到新会话的历史加载完）。
+     */
+    function SidebarQuoteButton(props) {
+      const { sessionId, displayTitle, quoteLastAnswer, t } = props
+      const label = tr(t, 'quoteLast')
+      return h(
+        'button',
+        {
+          type: 'button',
+          className: `${CLS}_rowBtn`,
+          title: label,
+          'aria-label': displayTitle ? label + '：' + displayTitle : label,
+          onClick: () => {
+            if (typeof quoteLastAnswer === 'function') quoteLastAnswer(sessionId)
+          },
+        },
+        // 一个引号图标，跟宿主自带的 16px 图标同一视觉重量
+        h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+          h('path', {
+            d: 'M3 4.5h6M3 8h6M3 11.5h3.5',
+            stroke: 'currentColor',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+          }),
+          h('path', {
+            d: 'M12.2 6.2c.9.5 1.4 1.3 1.4 2.3 0 1.4-1.1 2.5-2.5 2.5',
+            stroke: 'currentColor',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+            strokeDasharray: '0.1 2.2',
+          }),
+        ),
+      )
     }
 
     /** 鼠标旁边那张小卡片：选中助手正文后出现。 */
@@ -507,16 +678,19 @@ window.__ModuleLoader__.load({
       selected: '已选中文字',
       selectedTurn: '已选中第 {turn} 轮的文字',
       quote: '引用回复',
+      quoteLast: '引用最后一条回答',
     }
 
     const en = {
       selected: 'Text selected',
       selectedTurn: 'Text selected in turn {turn}',
       quote: 'Quote',
+      quoteLast: 'Quote the last answer',
     }
 
     return {
-      inject: ['slots', 'locale'],
+      // uiWorkspace：侧栏按钮要用它切会话（openSession）。
+      inject: ['slots', 'locale', 'uiWorkspace'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'quick-reply: dictionaries')
         ctx.effect(() => insertStyles(), 'quick-reply: styles')
@@ -553,6 +727,34 @@ window.__ModuleLoader__.load({
               order: 0,
             },
             SelectionFloat,
+          ),
+        )
+
+        // 侧栏会话行末尾的「引用最后一条回答」按钮。
+        // 行为：先切到那个会话，再让 ComposerBridge 把它的最后一条回答填进草稿。
+        // 为什么不直接在这里读：这个槽位是 root 作用域，没有 inputActions，
+        // 也读不到聊天快照；桥跟着会话重挂，天然能等到历史加载完。
+        ctx.slots.inject('sidebar.workspaces.session.row.action', () =>
+          ctx.slots.register(
+            {
+              name: 'sidebar.workspaces.session.row.action',
+              id: 'quick-reply-row-quote',
+              order: 150,
+              locale: NS,
+              inject: () => ({
+                quoteLastAnswer: (sessionId) => {
+                  if (!sessionId) return
+                  // 先记待办再切会话：切换是异步的，桥会在新会话挂载后读到它
+                  pendingQuoteStore.set(sessionId)
+                  try {
+                    ctx.uiWorkspace.openSession(sessionId)
+                  } catch {
+                    pendingQuoteStore.set(null)
+                  }
+                },
+              }),
+            },
+            SidebarQuoteButton,
           ),
         )
       },

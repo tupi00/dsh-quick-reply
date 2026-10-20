@@ -15,9 +15,19 @@ assert.ok(start !== -1 && end !== -1, 'client.js 里找不到 PURE-HELPERS 标�
 
 const body = source.slice(source.indexOf('\n', start) + 1, source.lastIndexOf('\n', end))
 const helpers = new Function(
-  `${body}\nreturn { quoteText, quoteExcerpt, mergeDraft, turnRefLine, quoteInsert }`,
+  `${body}\nreturn { quoteText, quoteExcerpt, mergeDraft, turnRefLine, quoteInsert, assistantText, lastAssistantAnswer, lastAssistantText, lastAssistantTurn }`,
 )()
-const { quoteText, quoteExcerpt, mergeDraft, turnRefLine, quoteInsert } = helpers
+const {
+  quoteText,
+  quoteExcerpt,
+  mergeDraft,
+  turnRefLine,
+  quoteInsert,
+  assistantText,
+  lastAssistantAnswer,
+  lastAssistantText,
+  lastAssistantTurn,
+} = helpers
 
 let passed = 0
 function test(name, fn) {
@@ -104,6 +114,83 @@ test('quoteInsert 没有轮次号时只给引用（也要留末尾换行）', ()
 
 test('quoteInsert 的空内容仍保留出处标注（不该整块消失）', () => {
   assert.equal(quoteInsert('', 5), '>  （引用自第5轮回答）\n')
+})
+
+// ---- 侧栏引用：从聊天快照里挑「最后一条说完了的助手回答」 ----
+
+/** 造一个助手步骤节点，blocks 里塞几个块。 */
+function step(turn, status, blocks) {
+  return { kind: 'assistant-step', data: { turn, status, blocks } }
+}
+
+/** 造一个最小的聊天快照：order 是 key 顺序，nodes.get(key) 取节点。 */
+function snapshotOf(entries) {
+  const map = new Map(entries)
+  return { order: entries.map(([key]) => key), nodes: { get: (key) => map.get(key) } }
+}
+
+test('assistantText 只拼正文文字块', () => {
+  assert.equal(
+    assistantText([
+      { kind: 'text', text: '第一段' },
+      { kind: 'reasoning', text: '想一想' },
+      { kind: 'tool-call', text: '跑个命令' },
+      { kind: 'text', text: '第二段' },
+    ]),
+    '第一段\n第二段',
+  )
+  // 空块 / 不是数组都该安静返回空串，不能抛
+  assert.equal(assistantText([]), '')
+  assert.equal(assistantText(undefined), '')
+  assert.equal(assistantText([{ kind: 'text', text: 42 }]), '')
+})
+
+test('lastAssistantAnswer 取最后一条已结束的助手回答', () => {
+  const snapshot = snapshotOf([
+    ['a', step(1, 'settled', [{ kind: 'text', text: '第一轮回答' }])],
+    ['u', { kind: 'user', data: {} }],
+    ['b', step(2, 'settled', [{ kind: 'text', text: '第二轮回答' }])],
+  ])
+  assert.deepEqual(lastAssistantAnswer(snapshot), { text: '第二轮回答', turn: 2 })
+})
+
+test('lastAssistantAnswer 跳过还在跑的那一步', () => {
+  const snapshot = snapshotOf([
+    ['a', step(1, 'settled', [{ kind: 'text', text: '已经说完的' }])],
+    ['b', step(2, 'running', [{ kind: 'text', text: '才说到一半' }])],
+  ])
+  // 引一半会被截断，宁可用上一条完整的
+  assert.deepEqual(lastAssistantAnswer(snapshot), { text: '已经说完的', turn: 1 })
+})
+
+test('lastAssistantAnswer 跳过只有工具调用的步骤', () => {
+  const snapshot = snapshotOf([
+    ['a', step(1, 'settled', [{ kind: 'text', text: '真正的回答' }])],
+    ['b', step(1, 'settled', [{ kind: 'tool-call', text: 'read' }])],
+  ])
+  assert.deepEqual(lastAssistantAnswer(snapshot), { text: '真正的回答', turn: 1 })
+})
+
+test('lastAssistantAnswer 找不到时返回空（会话还没回答过）', () => {
+  assert.deepEqual(lastAssistantAnswer(snapshotOf([])), { text: '', turn: 0 })
+  assert.deepEqual(lastAssistantAnswer(undefined), { text: '', turn: 0 })
+  assert.deepEqual(lastAssistantAnswer({ order: [], nodes: { get: () => undefined } }), {
+    text: '',
+    turn: 0,
+  })
+})
+
+test('lastAssistantAnswer 轮次号不合法时只丢轮次号、文字照留', () => {
+  const snapshot = snapshotOf([['a', step('x', 'settled', [{ kind: 'text', text: '回答' }])]])
+  assert.deepEqual(lastAssistantAnswer(snapshot), { text: '回答', turn: 0 })
+})
+
+test('lastAssistantText / lastAssistantTurn 只返回基本类型（供 selector 用）', () => {
+  const snapshot = snapshotOf([['a', step(3, 'settled', [{ kind: 'text', text: '答案' }])]])
+  assert.equal(lastAssistantText(snapshot), '答案')
+  assert.equal(lastAssistantTurn(snapshot), 3)
+  assert.equal(lastAssistantText(undefined), '')
+  assert.equal(lastAssistantTurn(undefined), 0)
 })
 
 console.log(`\n${passed} passed`)
