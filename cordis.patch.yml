@@ -1,0 +1,3 @@
+- insert:
+    - id: quick-reply
+      name: '@local/quick-reply'

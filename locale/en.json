@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Quote Reply",
+    "description": "Select text in an assistant message and a Quote button appears above the composer. Clicking it turns the selection into a quote block in the draft — it never sends by itself."
+  }
+}
